@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -24,6 +25,90 @@ func TestFormatOSCPreview(t *testing.T) {
 		if res != c.expected {
 			t.Errorf("formatOSCPreview(%q) = %q, expected %q", c.input, res, c.expected)
 		}
+	}
+}
+
+func TestFaderMathConversions(t *testing.T) {
+	testPoints := []struct {
+		fader      float32
+		expectedDB float32
+		normDB     float32
+	}{
+		{fader: 0.0, expectedDB: -90.0, normDB: 0.0},
+		{fader: 0.0625, expectedDB: -60.0, normDB: 0.30},
+		{fader: 0.25, expectedDB: -30.0, normDB: 0.60},
+		{fader: 0.50, expectedDB: -10.0, normDB: 0.80},
+		{fader: 0.75, expectedDB: 0.0, normDB: 0.90},
+		{fader: 1.0, expectedDB: 10.0, normDB: 1.0},
+	}
+
+	for _, pt := range testPoints {
+		// Forward fader -> dB
+		db := faderToDB(pt.fader)
+		if math.Abs(float64(db-pt.expectedDB)) > 0.001 {
+			t.Errorf("faderToDB(%f) = %f, expected %f", pt.fader, db, pt.expectedDB)
+		}
+
+		// Forward fader -> normDB
+		norm := faderToNormDB(pt.fader)
+		if math.Abs(float64(norm-pt.normDB)) > 0.001 {
+			t.Errorf("faderToNormDB(%f) = %f, expected %f", pt.fader, norm, pt.normDB)
+		}
+
+		// Inverse normDB -> fader
+		fBack := normDBToFader(pt.normDB)
+		if math.Abs(float64(fBack-pt.fader)) > 0.001 {
+			t.Errorf("normDBToFader(%f) = %f, expected %f", pt.normDB, fBack, pt.fader)
+		}
+
+		// Inverse dB -> fader
+		fBackFromDB := dbToFader(pt.expectedDB)
+		if math.Abs(float64(fBackFromDB-pt.fader)) > 0.001 {
+			t.Errorf("dbToFader(%f) = %f, expected %f", pt.expectedDB, fBackFromDB, pt.fader)
+		}
+	}
+}
+
+func TestOSCEncodingDecoding(t *testing.T) {
+	addr := "/ch/01/mix/fader"
+	val := float32(0.75)
+
+	encoded := buildOSCSingleFloat(addr, val)
+	parsedAddr, parsedVal, ok := parseOSCSingleFloat(encoded)
+	if !ok {
+		t.Fatalf("Failed to parse encoded OSC packet")
+	}
+	if parsedAddr != addr {
+		t.Errorf("Parsed address %q != %q", parsedAddr, addr)
+	}
+	if math.Abs(float64(parsedVal-val)) > 0.0001 {
+		t.Errorf("Parsed value %f != %f", parsedVal, val)
+	}
+
+	// Test M32 -> LP Translation
+	lpPacket, translated := translateM32ToLP(encoded)
+	if !translated {
+		t.Fatalf("Expected translateM32ToLP to translate /fader")
+	}
+	lpAddr, lpVal, ok := parseOSCSingleFloat(lpPacket)
+	if !ok || lpAddr != "/ch/01/mix/fader/db" {
+		t.Fatalf("Expected /ch/01/mix/fader/db, got %q", lpAddr)
+	}
+	if math.Abs(float64(lpVal-0.90)) > 0.001 {
+		t.Errorf("Expected normDB 0.90, got %f", lpVal)
+	}
+
+	// Test LP -> M32 Translation
+	m32Packet, translated := translateLPToM32(lpPacket)
+	if !translated {
+		t.Fatalf("Expected translateLPToM32 to translate /fader/db")
+	}
+	backAddr, backVal, ok := parseOSCSingleFloat(m32Packet)
+	if !ok || backAddr != "/ch/01/mix/fader" {
+		t.Fatalf("Expected /ch/01/mix/fader, got %q", backAddr)
+	}
+	if math.Abs(float64(backVal-0.75)) > 0.001 {
+		t.Errorf("Expected fader 0.75, got %f", backVal)
 	}
 }
 
@@ -67,7 +152,7 @@ func TestProxyIntegration(t *testing.T) {
 		"--m32-port=18023",
 		"--lp-host=127.0.0.1",
 		"--lp-port=18024",
-		"--heartbeat=1", // Fast heartbeat for test speed
+		"--heartbeat=1",
 		"--verbose",
 	)
 
@@ -87,7 +172,6 @@ func TestProxyIntegration(t *testing.T) {
 	// Allow proxy binding time
 	time.Sleep(300 * time.Millisecond)
 
-	// 4. Test Case A: LiveProfessor -> Proxy -> M32 Relay
 	proxyEndpoint, err := net.ResolveUDPAddr("udp", "127.0.0.1:18025")
 	if err != nil {
 		t.Fatalf("Failed to resolve proxy endpoint: %v", err)
@@ -99,13 +183,15 @@ func TestProxyIntegration(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	testOSCPacket := []byte("/ch/01/mix/fader\x00\x00\x00,f\x00\x00\x3f\x80\x00\x00")
+	// 4. Test Case A: LiveProfessor -> Proxy -> M32 (/fader/db -> /fader with value translation)
+	// LP sends 0.90 normDB (0 dB) to /ch/01/mix/fader/db
+	testOSCPacket := buildOSCSingleFloat("/ch/01/mix/fader/db", 0.90)
 	_, err = clientConn.WriteToUDP(testOSCPacket, proxyEndpoint)
 	if err != nil {
 		t.Fatalf("Failed to send test packet to proxy: %v", err)
 	}
 
-	// Assert mock M32 received it
+	// Assert mock M32 received /ch/01/mix/fader with 0.75 (0 dB unity fader position)
 	buf := make([]byte, 1024)
 	if err := m32Conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatalf("Failed to set read deadline: %v", err)
@@ -114,18 +200,23 @@ func TestProxyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TIMEOUT: Mock M32 did not receive relayed packet: %v", err)
 	}
-	if n != len(testOSCPacket) {
-		t.Errorf("Expected packet size %d, got %d", len(testOSCPacket), n)
+	addr, faderVal, ok := parseOSCSingleFloat(buf[:n])
+	if !ok || addr != "/ch/01/mix/fader" {
+		t.Fatalf("Expected address /ch/01/mix/fader, got %q", addr)
+	}
+	if math.Abs(float64(faderVal-0.75)) > 0.001 {
+		t.Errorf("Expected fader position 0.75, got %f", faderVal)
 	}
 
-	// 5. Test Case B: M32 -> Proxy -> LiveProfessor Relay
-	// Note: To send *from* the mock M32 IP/port, we write back through m32Conn to the proxy's local port (18025)
-	_, err = m32Conn.WriteToUDP([]byte("/meters/1\x00\x00\x00"), proxyEndpoint)
+	// 5. Test Case B: M32 -> Proxy -> LiveProfessor (/fader -> /fader/db with value translation)
+	// M32 sends fader position 0.75 (0 dB)
+	m32FaderPacket := buildOSCSingleFloat("/ch/01/mix/fader", 0.75)
+	_, err = m32Conn.WriteToUDP(m32FaderPacket, proxyEndpoint)
 	if err != nil {
 		t.Fatalf("Failed to write mock feedback from M32: %v", err)
 	}
 
-	// Assert LiveProfessor listener received it
+	// Assert LiveProfessor listener received /ch/01/mix/fader/db with 0.90
 	if err := lpListener.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatalf("Failed to set read deadline: %v", err)
 	}
@@ -133,12 +224,32 @@ func TestProxyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TIMEOUT: Mock LiveProfessor listener did not receive M32 feedback: %v", err)
 	}
-	expectedFeedback := "/meters/1\x00\x00\x00"
-	if string(buf[:n]) != expectedFeedback {
-		t.Errorf("Expected feedback %q, got %q", expectedFeedback, string(buf[:n]))
+	lpRecvAddr, lpRecvVal, ok := parseOSCSingleFloat(buf[:n])
+	if !ok || lpRecvAddr != "/ch/01/mix/fader/db" {
+		t.Fatalf("Expected /ch/01/mix/fader/db, got %q", lpRecvAddr)
+	}
+	if math.Abs(float64(lpRecvVal-0.90)) > 0.001 {
+		t.Errorf("Expected normDB 0.90, got %f", lpRecvVal)
 	}
 
-	// 6. Test Case C: Automated /xremote Heartbeat Verification
+	// 6. Test Case C: Non-fader OSC Passthrough
+	nonFaderPacket := []byte("/meters/1\x00\x00\x00")
+	_, err = m32Conn.WriteToUDP(nonFaderPacket, proxyEndpoint)
+	if err != nil {
+		t.Fatalf("Failed to write mock non-fader from M32: %v", err)
+	}
+	if err := lpListener.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("Failed to set read deadline: %v", err)
+	}
+	n, _, err = lpListener.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("TIMEOUT: Mock LP listener did not receive passthrough message: %v", err)
+	}
+	if string(buf[:n]) != string(nonFaderPacket) {
+		t.Errorf("Expected passthrough %q, got %q", string(nonFaderPacket), string(buf[:n]))
+	}
+
+	// 7. Test Case D: Automated /xremote Heartbeat Verification
 	if err := m32Conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatalf("Failed to set read deadline: %v", err)
 	}
