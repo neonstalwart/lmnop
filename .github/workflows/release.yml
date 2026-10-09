@@ -7,10 +7,8 @@ on:
 
 jobs:
   build:
-    name: Build and Release
+    name: Build (${{ matrix.os }}/${{ matrix.arch }})
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     strategy:
       matrix:
         include:
@@ -41,11 +39,34 @@ jobs:
           GOARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist
-          go build -ldflags="-s -w" -o dist/${{ matrix.binary }} main.go
+          go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o dist/${{ matrix.binary }} main.go
 
-      - name: Release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: dist/${{ matrix.binary }}
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

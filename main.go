@@ -183,6 +183,8 @@ func translateLPToM32(data []byte) ([]byte, *TranslationDetail) {
 	return data, nil
 }
 
+var version = "dev"
+
 func main() {
 	// Define CLI flags with sensible defaults
 	localPort := flag.Int("local-port", 9001, "Port the proxy listens on locally for LiveProfessor")
@@ -192,12 +194,18 @@ func main() {
 	lpPort := flag.Int("lp-port", 9000, "Port LiveProfessor is listening on for feedback")
 	heartbeatSec := flag.Int("heartbeat", 8, "Interval in seconds to send automated /xremote keep-alive")
 	verbose := flag.Bool("verbose", false, "Enable verbose packet logging")
+	showVersion := flag.Bool("version", false, "Show version information")
 	help := flag.Bool("help", false, "Show help message")
 
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Printf("lmnop version %s\n", version)
+		os.Exit(0)
+	}
+
 	if *help {
-		fmt.Println("LMNOP - LiveProfessor M32 Network OSC Proxy")
+		fmt.Printf("LMNOP - LiveProfessor M32 Network OSC Proxy (%s)\n", version)
 		fmt.Println("Usage:")
 		flag.PrintDefaults()
 		os.Exit(0)
