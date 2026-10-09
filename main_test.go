@@ -146,7 +146,7 @@ func TestProxyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TIMEOUT: Did not receive automated /xremote heartbeat ticker: %v", err)
 	}
-	expectedHeartbeat := string([]byte("/xremote\x00\x00\x00\x00"))
+	expectedHeartbeat := string([]byte("/xremote\x00\x00\x00\x00,\x00\x00\x00"))
 	receivedStr := string(buf[:n])
 	if receivedStr != expectedHeartbeat {
 		t.Errorf("Expected heartbeat %q, got %q", expectedHeartbeat, receivedStr)

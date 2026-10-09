@@ -84,9 +84,9 @@ func main() {
 		ticker := time.NewTicker(time.Duration(*heartbeatSec) * time.Second)
 		defer ticker.Stop()
 
-		// OSC strings must be null-terminated and padded to 4-byte boundaries.
-		// "/xremote\0\0\0\0" is exactly 12 bytes.
-		xremotePacket := []byte("/xremote\x00\x00\x00\x00")
+		// OSC format: address pattern padded to 4 bytes (12 bytes) + type tag string ",\0\0\0" (4 bytes).
+		// Exactly 16 bytes matching standard OSC 1.0 and M32-Edit format.
+		xremotePacket := []byte("/xremote\x00\x00\x00\x00,\x00\x00\x00")
 
 		for range ticker.C {
 			_, err := conn.WriteToUDP(xremotePacket, m32Addr)
