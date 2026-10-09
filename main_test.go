@@ -10,6 +10,23 @@ import (
 	"time"
 )
 
+func TestFormatOSCPreview(t *testing.T) {
+	cases := []struct {
+		input    []byte
+		expected string
+	}{
+		{input: []byte("/ch/01/mix/fader\x00\x00\x00,f"), expected: "/ch/01/mix/fader"},
+		{input: []byte("simple"), expected: "simple"},
+	}
+
+	for _, c := range cases {
+		res := formatOSCPreview(c.input)
+		if res != c.expected {
+			t.Errorf("formatOSCPreview(%q) = %q, expected %q", c.input, res, c.expected)
+		}
+	}
+}
+
 func TestProxyIntegration(t *testing.T) {
 	// 1. Set up a mock "M32 Console" UDP listener
 	mockM32Addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:18023")
@@ -51,6 +68,7 @@ func TestProxyIntegration(t *testing.T) {
 		"--lp-host=127.0.0.1",
 		"--lp-port=18024",
 		"--heartbeat=1", // Fast heartbeat for test speed
+		"--verbose",
 	)
 
 	cmd.Stdout = os.Stdout
