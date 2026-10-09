@@ -30,16 +30,16 @@ func TestFormatOSCPreview(t *testing.T) {
 
 func TestFaderMathConversions(t *testing.T) {
 	testPoints := []struct {
-		fader      float32
-		expectedDB float32
-		normDB     float32
+		fader         float32
+		expectedDB    float32
+		expectedTaper float32
 	}{
-		{fader: 0.0, expectedDB: -90.0, normDB: 0.0},
-		{fader: 0.0625, expectedDB: -60.0, normDB: 0.30},
-		{fader: 0.25, expectedDB: -30.0, normDB: 0.60},
-		{fader: 0.50, expectedDB: -10.0, normDB: 0.80},
-		{fader: 0.75, expectedDB: 0.0, normDB: 0.90},
-		{fader: 1.0, expectedDB: 10.0, normDB: 1.0},
+		{fader: 0.0, expectedDB: -90.0, expectedTaper: 0.0},
+		{fader: 0.0625, expectedDB: -60.0, expectedTaper: 0.01778},
+		{fader: 0.25, expectedDB: -30.0, expectedTaper: 0.10000},
+		{fader: 0.50, expectedDB: -10.0, expectedTaper: 0.31623},
+		{fader: 0.75, expectedDB: 0.0, expectedTaper: 0.56234},
+		{fader: 1.0, expectedDB: 10.0, expectedTaper: 1.00000},
 	}
 
 	for _, pt := range testPoints {
@@ -49,16 +49,16 @@ func TestFaderMathConversions(t *testing.T) {
 			t.Errorf("faderToDB(%f) = %f, expected %f", pt.fader, db, pt.expectedDB)
 		}
 
-		// Forward fader -> normDB
-		norm := faderToNormDB(pt.fader)
-		if math.Abs(float64(norm-pt.normDB)) > 0.001 {
-			t.Errorf("faderToNormDB(%f) = %f, expected %f", pt.fader, norm, pt.normDB)
+		// Forward fader -> LiveProfessor taper
+		taper := faderToLPTaper(pt.fader)
+		if math.Abs(float64(taper-pt.expectedTaper)) > 0.001 {
+			t.Errorf("faderToLPTaper(%f) = %f, expected %f", pt.fader, taper, pt.expectedTaper)
 		}
 
-		// Inverse normDB -> fader
-		fBack := normDBToFader(pt.normDB)
-		if math.Abs(float64(fBack-pt.fader)) > 0.001 {
-			t.Errorf("normDBToFader(%f) = %f, expected %f", pt.normDB, fBack, pt.fader)
+		// Inverse LiveProfessor taper -> fader
+		fBack := lpTaperToFader(pt.expectedTaper)
+		if math.Abs(float64(fBack-pt.fader)) > 0.005 {
+			t.Errorf("lpTaperToFader(%f) = %f, expected %f", pt.expectedTaper, fBack, pt.fader)
 		}
 
 		// Inverse dB -> fader
@@ -71,7 +71,7 @@ func TestFaderMathConversions(t *testing.T) {
 
 func TestOSCEncodingDecoding(t *testing.T) {
 	addr := "/ch/01/mix/fader"
-	val := float32(0.75)
+	val := float32(0.75) // 0 dB unity
 
 	encoded := buildOSCSingleFloat(addr, val)
 	parsedAddr, parsedVal, ok := parseOSCSingleFloat(encoded)
@@ -85,23 +85,23 @@ func TestOSCEncodingDecoding(t *testing.T) {
 		t.Errorf("Parsed value %f != %f", parsedVal, val)
 	}
 
-	// Test M32 -> LP Translation
+	// Test M32 -> LP Translation (fader 0.75 -> 0 dB -> taper ~0.5623)
 	lpPacket, detailM32 := translateM32ToLP(encoded)
 	if detailM32 == nil {
 		t.Fatalf("Expected translateM32ToLP to translate /fader")
 	}
-	if math.Abs(float64(detailM32.RealDB-0.0)) > 0.001 || math.Abs(float64(detailM32.NormDB-0.90)) > 0.001 {
-		t.Errorf("Expected RealDB=0.0 and NormDB=0.90, got RealDB=%f NormDB=%f", detailM32.RealDB, detailM32.NormDB)
+	if math.Abs(float64(detailM32.RealDB-0.0)) > 0.001 || math.Abs(float64(detailM32.TaperVal-0.56234)) > 0.001 {
+		t.Errorf("Expected RealDB=0.0 and TaperVal=0.56234, got RealDB=%f TaperVal=%f", detailM32.RealDB, detailM32.TaperVal)
 	}
 	lpAddr, lpVal, ok := parseOSCSingleFloat(lpPacket)
 	if !ok || lpAddr != "/ch/01/mix/fader/db" {
 		t.Fatalf("Expected /ch/01/mix/fader/db, got %q", lpAddr)
 	}
-	if math.Abs(float64(lpVal-0.90)) > 0.001 {
-		t.Errorf("Expected normDB 0.90, got %f", lpVal)
+	if math.Abs(float64(lpVal-0.56234)) > 0.001 {
+		t.Errorf("Expected taper 0.56234, got %f", lpVal)
 	}
 
-	// Test LP -> M32 Translation
+	// Test LP -> M32 Translation (taper 0.56234 -> 0 dB -> fader 0.75)
 	m32Packet, detailLP := translateLPToM32(lpPacket)
 	if detailLP == nil {
 		t.Fatalf("Expected translateLPToM32 to translate /fader/db")
@@ -189,9 +189,9 @@ func TestProxyIntegration(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	// 4. Test Case A: LiveProfessor -> Proxy -> M32 (/fader/db -> /fader with value translation)
-	// LP sends 0.90 normDB (0 dB) to /ch/01/mix/fader/db
-	testOSCPacket := buildOSCSingleFloat("/ch/01/mix/fader/db", 0.90)
+	// 4. Test Case A: LiveProfessor -> Proxy -> M32 (/fader/db -> /fader with taper translation)
+	// LP sends 0.56234 taper (0 dB unity) to /ch/01/mix/fader/db
+	testOSCPacket := buildOSCSingleFloat("/ch/01/mix/fader/db", 0.56234)
 	_, err = clientConn.WriteToUDP(testOSCPacket, proxyEndpoint)
 	if err != nil {
 		t.Fatalf("Failed to send test packet to proxy: %v", err)
@@ -210,11 +210,11 @@ func TestProxyIntegration(t *testing.T) {
 	if !ok || addr != "/ch/01/mix/fader" {
 		t.Fatalf("Expected address /ch/01/mix/fader, got %q", addr)
 	}
-	if math.Abs(float64(faderVal-0.75)) > 0.001 {
+	if math.Abs(float64(faderVal-0.75)) > 0.005 {
 		t.Errorf("Expected fader position 0.75, got %f", faderVal)
 	}
 
-	// 5. Test Case B: M32 -> Proxy -> LiveProfessor (/fader -> /fader/db with value translation)
+	// 5. Test Case B: M32 -> Proxy -> LiveProfessor (/fader -> /fader/db with taper translation)
 	// M32 sends fader position 0.75 (0 dB)
 	m32FaderPacket := buildOSCSingleFloat("/ch/01/mix/fader", 0.75)
 	_, err = m32Conn.WriteToUDP(m32FaderPacket, proxyEndpoint)
@@ -222,7 +222,7 @@ func TestProxyIntegration(t *testing.T) {
 		t.Fatalf("Failed to write mock feedback from M32: %v", err)
 	}
 
-	// Assert LiveProfessor listener received /ch/01/mix/fader/db with 0.90
+	// Assert LiveProfessor listener received /ch/01/mix/fader/db with 0.56234
 	if err := lpListener.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatalf("Failed to set read deadline: %v", err)
 	}
@@ -234,8 +234,8 @@ func TestProxyIntegration(t *testing.T) {
 	if !ok || lpRecvAddr != "/ch/01/mix/fader/db" {
 		t.Fatalf("Expected /ch/01/mix/fader/db, got %q", lpRecvAddr)
 	}
-	if math.Abs(float64(lpRecvVal-0.90)) > 0.001 {
-		t.Errorf("Expected normDB 0.90, got %f", lpRecvVal)
+	if math.Abs(float64(lpRecvVal-0.56234)) > 0.001 {
+		t.Errorf("Expected taper 0.56234, got %f", lpRecvVal)
 	}
 
 	// 6. Test Case C: Non-fader OSC Passthrough

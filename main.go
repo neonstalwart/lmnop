@@ -69,28 +69,32 @@ func dbToFader(db float32) float32 {
 	}
 }
 
-// faderToNormDB maps M32 fader [0.0, 1.0] to normalized linear dB [0.0, 1.0] (-90dB = 0.0, +10dB = 1.0, 0dB = 0.9).
-func faderToNormDB(f float32) float32 {
+// faderToLPTaper maps M32 fader [0.0, 1.0] to LiveProfessor logarithmic audio taper [0.0, 1.0]
+// based on 40*log10(x) response: x = 10^((dB - 10.0)/40.0).
+func faderToLPTaper(f float32) float32 {
 	db := faderToDB(f)
-	norm := (db + 90.0) / 100.0
-	if norm < 0.0 {
+	if db <= -90.0 {
 		return 0.0
 	}
-	if norm > 1.0 {
+	taper := float32(math.Pow(10.0, float64((db-10.0)/40.0)))
+	if taper < 0.0 {
+		return 0.0
+	}
+	if taper > 1.0 {
 		return 1.0
 	}
-	return norm
+	return taper
 }
 
-// normDBToFader maps normalized linear dB [0.0, 1.0] back to M32 fader position [0.0, 1.0].
-func normDBToFader(norm float32) float32 {
-	if norm < 0.0 {
-		norm = 0.0
+// lpTaperToFader maps LiveProfessor logarithmic audio taper [0.0, 1.0] back to M32 fader position [0.0, 1.0].
+func lpTaperToFader(taper float32) float32 {
+	if taper <= 0.0001 {
+		return 0.0
 	}
-	if norm > 1.0 {
-		norm = 1.0
+	if taper > 1.0 {
+		taper = 1.0
 	}
-	db := norm*100.0 - 90.0
+	db := float32(10.0 + 40.0*math.Log10(float64(taper)))
 	return dbToFader(db)
 }
 
@@ -138,24 +142,24 @@ type TranslationDetail struct {
 	TargetAddr   string
 	FaderPos     float32
 	RealDB       float32
-	NormDB       float32
+	TaperVal     float32
 }
 
-// translateM32ToLP translates M32 `/.../fader` messages to `/.../fader/db` with normalized dB values.
+// translateM32ToLP translates M32 `/.../fader` messages to `/.../fader/db` with LiveProfessor logarithmic audio taper values.
 func translateM32ToLP(data []byte) ([]byte, *TranslationDetail) {
 	addr, val, ok := parseOSCSingleFloat(data)
 	if ok && strings.HasSuffix(addr, "/fader") {
 		db := faderToDB(val)
-		normDB := faderToNormDB(val)
+		taperVal := faderToLPTaper(val)
 		targetAddr := addr + "/db"
 		detail := &TranslationDetail{
 			OriginalAddr: addr,
 			TargetAddr:   targetAddr,
 			FaderPos:     val,
 			RealDB:       db,
-			NormDB:       normDB,
+			TaperVal:     taperVal,
 		}
-		return buildOSCSingleFloat(targetAddr, normDB), detail
+		return buildOSCSingleFloat(targetAddr, taperVal), detail
 	}
 	return data, nil
 }
@@ -165,14 +169,14 @@ func translateLPToM32(data []byte) ([]byte, *TranslationDetail) {
 	addr, val, ok := parseOSCSingleFloat(data)
 	if ok && strings.HasSuffix(addr, "/fader/db") {
 		targetAddr := strings.TrimSuffix(addr, "/db")
-		faderPos := normDBToFader(val)
+		faderPos := lpTaperToFader(val)
 		db := faderToDB(faderPos)
 		detail := &TranslationDetail{
 			OriginalAddr: addr,
 			TargetAddr:   targetAddr,
 			FaderPos:     faderPos,
 			RealDB:       db,
-			NormDB:       val,
+			TaperVal:     val,
 		}
 		return buildOSCSingleFloat(targetAddr, faderPos), detail
 	}
@@ -265,8 +269,8 @@ func main() {
 			outPacket, detail := translateM32ToLP(rawPacket)
 			if *verbose {
 				if detail != nil {
-					log.Printf("[M32 -> LP (fader)] %s (pos: %.4f, %+.2f dB) -> %s (norm_db: %.4f)",
-						detail.OriginalAddr, detail.FaderPos, detail.RealDB, detail.TargetAddr, detail.NormDB)
+					log.Printf("[M32 -> LP (fader)] %s (pos: %.4f, %+.2f dB) -> %s (val: %.4f)",
+						detail.OriginalAddr, detail.FaderPos, detail.RealDB, detail.TargetAddr, detail.TaperVal)
 				} else if addr, fVal, ok := parseOSCSingleFloat(rawPacket); ok {
 					log.Printf("[M32 -> LP] %s (float: %v) -> %s", addr, fVal, lpAddr.String())
 				} else {
@@ -282,8 +286,8 @@ func main() {
 			outPacket, detail := translateLPToM32(rawPacket)
 			if *verbose {
 				if detail != nil {
-					log.Printf("[LP -> M32 (fader)] %s (norm_db: %.4f, %+.2f dB) -> %s (pos: %.4f)",
-						detail.OriginalAddr, detail.NormDB, detail.RealDB, detail.TargetAddr, detail.FaderPos)
+					log.Printf("[LP -> M32 (fader)] %s (val: %.4f, %+.2f dB) -> %s (pos: %.4f)",
+						detail.OriginalAddr, detail.TaperVal, detail.RealDB, detail.TargetAddr, detail.FaderPos)
 				} else if addr, fVal, ok := parseOSCSingleFloat(rawPacket); ok {
 					log.Printf("[LP -> M32] %s (float: %v) from %s -> %s", addr, fVal, remoteAddr.String(), m32Addr.String())
 				} else {
