@@ -132,25 +132,51 @@ func buildOSCSingleFloat(address string, val float32) []byte {
 	return msg
 }
 
+// TranslationDetail holds parsed numeric values for verbose debugging.
+type TranslationDetail struct {
+	OriginalAddr string
+	TargetAddr   string
+	FaderPos     float32
+	RealDB       float32
+	NormDB       float32
+}
+
 // translateM32ToLP translates M32 `/.../fader` messages to `/.../fader/db` with normalized dB values.
-func translateM32ToLP(data []byte) ([]byte, bool) {
+func translateM32ToLP(data []byte) ([]byte, *TranslationDetail) {
 	addr, val, ok := parseOSCSingleFloat(data)
 	if ok && strings.HasSuffix(addr, "/fader") {
+		db := faderToDB(val)
 		normDB := faderToNormDB(val)
-		return buildOSCSingleFloat(addr+"/db", normDB), true
+		targetAddr := addr + "/db"
+		detail := &TranslationDetail{
+			OriginalAddr: addr,
+			TargetAddr:   targetAddr,
+			FaderPos:     val,
+			RealDB:       db,
+			NormDB:       normDB,
+		}
+		return buildOSCSingleFloat(targetAddr, normDB), detail
 	}
-	return data, false
+	return data, nil
 }
 
 // translateLPToM32 translates LiveProfessor `/.../fader/db` messages to `/.../fader` with M32 fader positions.
-func translateLPToM32(data []byte) ([]byte, bool) {
+func translateLPToM32(data []byte) ([]byte, *TranslationDetail) {
 	addr, val, ok := parseOSCSingleFloat(data)
 	if ok && strings.HasSuffix(addr, "/fader/db") {
-		baseAddr := strings.TrimSuffix(addr, "/db")
+		targetAddr := strings.TrimSuffix(addr, "/db")
 		faderPos := normDBToFader(val)
-		return buildOSCSingleFloat(baseAddr, faderPos), true
+		db := faderToDB(faderPos)
+		detail := &TranslationDetail{
+			OriginalAddr: addr,
+			TargetAddr:   targetAddr,
+			FaderPos:     faderPos,
+			RealDB:       db,
+			NormDB:       val,
+		}
+		return buildOSCSingleFloat(targetAddr, faderPos), detail
 	}
-	return data, false
+	return data, nil
 }
 
 func main() {
@@ -236,12 +262,15 @@ func main() {
 		// Check who sent the packet
 		if remoteAddr.IP.Equal(m32Addr.IP) && remoteAddr.Port == m32Addr.Port {
 			// Message came from the M32 -> Translate fader and relay to LiveProfessor
-			outPacket, translated := translateM32ToLP(rawPacket)
+			outPacket, detail := translateM32ToLP(rawPacket)
 			if *verbose {
-				if translated {
-					log.Printf("[M32 -> LP (translated)] %s -> %s", formatOSCPreview(rawPacket), formatOSCPreview(outPacket))
+				if detail != nil {
+					log.Printf("[M32 -> LP (fader)] %s (pos: %.4f, %+.2f dB) -> %s (norm_db: %.4f)",
+						detail.OriginalAddr, detail.FaderPos, detail.RealDB, detail.TargetAddr, detail.NormDB)
+				} else if addr, fVal, ok := parseOSCSingleFloat(rawPacket); ok {
+					log.Printf("[M32 -> LP] %s (float: %v) -> %s", addr, fVal, lpAddr.String())
 				} else {
-					log.Printf("[M32 -> LP] %d bytes (%q) relayed to %s", len(outPacket), formatOSCPreview(outPacket), lpAddr.String())
+					log.Printf("[M32 -> LP] %d bytes (%q) -> %s", len(outPacket), formatOSCPreview(outPacket), lpAddr.String())
 				}
 			}
 			_, err = conn.WriteToUDP(outPacket, lpAddr)
@@ -250,12 +279,15 @@ func main() {
 			}
 		} else {
 			// Message came from LiveProfessor -> Translate fader/db and relay to M32
-			outPacket, translated := translateLPToM32(rawPacket)
+			outPacket, detail := translateLPToM32(rawPacket)
 			if *verbose {
-				if translated {
-					log.Printf("[LP -> M32 (translated)] %s -> %s", formatOSCPreview(rawPacket), formatOSCPreview(outPacket))
+				if detail != nil {
+					log.Printf("[LP -> M32 (fader)] %s (norm_db: %.4f, %+.2f dB) -> %s (pos: %.4f)",
+						detail.OriginalAddr, detail.NormDB, detail.RealDB, detail.TargetAddr, detail.FaderPos)
+				} else if addr, fVal, ok := parseOSCSingleFloat(rawPacket); ok {
+					log.Printf("[LP -> M32] %s (float: %v) from %s -> %s", addr, fVal, remoteAddr.String(), m32Addr.String())
 				} else {
-					log.Printf("[LP -> M32] %d bytes (%q) from %s relayed to %s", len(outPacket), formatOSCPreview(outPacket), remoteAddr.String(), m32Addr.String())
+					log.Printf("[LP -> M32] %d bytes (%q) from %s -> %s", len(outPacket), formatOSCPreview(outPacket), remoteAddr.String(), m32Addr.String())
 				}
 			}
 			_, err = conn.WriteToUDP(outPacket, m32Addr)

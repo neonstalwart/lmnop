@@ -86,9 +86,12 @@ func TestOSCEncodingDecoding(t *testing.T) {
 	}
 
 	// Test M32 -> LP Translation
-	lpPacket, translated := translateM32ToLP(encoded)
-	if !translated {
+	lpPacket, detailM32 := translateM32ToLP(encoded)
+	if detailM32 == nil {
 		t.Fatalf("Expected translateM32ToLP to translate /fader")
+	}
+	if math.Abs(float64(detailM32.RealDB-0.0)) > 0.001 || math.Abs(float64(detailM32.NormDB-0.90)) > 0.001 {
+		t.Errorf("Expected RealDB=0.0 and NormDB=0.90, got RealDB=%f NormDB=%f", detailM32.RealDB, detailM32.NormDB)
 	}
 	lpAddr, lpVal, ok := parseOSCSingleFloat(lpPacket)
 	if !ok || lpAddr != "/ch/01/mix/fader/db" {
@@ -99,9 +102,12 @@ func TestOSCEncodingDecoding(t *testing.T) {
 	}
 
 	// Test LP -> M32 Translation
-	m32Packet, translated := translateLPToM32(lpPacket)
-	if !translated {
+	m32Packet, detailLP := translateLPToM32(lpPacket)
+	if detailLP == nil {
 		t.Fatalf("Expected translateLPToM32 to translate /fader/db")
+	}
+	if math.Abs(float64(detailLP.FaderPos-0.75)) > 0.001 {
+		t.Errorf("Expected FaderPos=0.75, got %f", detailLP.FaderPos)
 	}
 	backAddr, backVal, ok := parseOSCSingleFloat(m32Packet)
 	if !ok || backAddr != "/ch/01/mix/fader" {
